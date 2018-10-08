@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Age Restrictor CloudFormation
+Parameters:
+  ModelAndCodeBucket:
+    Description: Name of the Bucket containing model data bundle as a ZIP object
+    Type: String
+    MinLength: 1
+  DLBundleObjectKey:
+    Description: The ZIP object prefix for the code bundle
+    Type: String
+    Default: deeplearning-bundle.zip
+    MinLength: 1
+  DLTestBucketName:
+    Description: Bucket where the test images will be located
+    Type: String
+    Default: model-data-bucket
+    MinLength: 1
+
+Resources:
+  myDLServerlessLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DLServerlessLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:GetLogEvents
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Sid: Stmt1501000329789
+                Effect: Allow
+                Action:
+                  - s3:Get*
+                Resource: !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref 'DLTestBucketName'
+                    - /*
+              - Sid: Stmt150100867543
+                Effect: Allow
+                Action:
+                  - s3:Get*
+                Resource: !Join
+                  - ''
+                  - - 'arn:aws:s3:::'
+                    - !Ref ModelAndCodeBucket
+                    - /*
+
+  ImageModeratorAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          version: "2017-06-11T02:20:25Z"
+          title: !Ref AWS::StackName
+        basePath: "/Prod"
+        schemes:
+        - "https"
+        paths:
+          /:
+            post:
+              produces:
+              - "application/json"
+              responses:
+                "200":
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "200"
+                uri: !Sub |-
+                  arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ImageModeratorFunction.Arn}/invocations
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws"
+        definitions:
+          Empty:
+            type: "object"
+            title: "Empty Schema"
+
+  myDeepLearningLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: age_lambda.lambda_handler
+      FunctionName: DeepLearning_Lambda
+      Role: !GetAtt 'myDLServerlessLambdaRole.Arn'
+      Description: Testing DL inference using DeepLearning model and AWS Lambda
+      MemorySize: 1800
+      CodeUri:
+        S3Bucket: !Ref ModelAndCodeBucket
+        S3Key: !Ref DLBundleObjectKey
+      Runtime: python3.6
+      Timeout: 4000
+      Environment:
+        Variables:
+          model_bucket_name: !Ref ModelAndCodeBucket
+          region: !Ref AWS::Region
+      Events:
+        ImageModeratorAPIPost:
+          Type: Api
+          Properties:
+            Path: /
+            Method: post
+            RestApiId: !Ref ImageModeratorAPI
+      Policies:
+        - RekognitionLabelsPolicy: {}
+  TensorFlowExecuteLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      FunctionName: !GetAtt myDeepLearningLambda.Arn
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Join
+        - ':'
+        - - arn
+          - aws
+          - s3
+          - ''
+          - ''
+          - !Ref DLTestBucketName
+Outputs:
+  outLambdaRole:
+    Value: !Ref myDLServerlessLambdaRole
+    Description: AWS Role for the lambda functions
+  outDeeplearningLambda:
+    Value: !Ref myDeepLearningLambda
+    Description: This is ARN of the our deep learning Lambda function
+  RequestURL:
+    Description: Prod URL for API to use as Request URL for Slack app
+    Value: https://${ImageModeratorAPI}.execute-api.${AWS::Region}.amazonaws.com/Prod/
